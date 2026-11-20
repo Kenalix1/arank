@@ -263,22 +263,23 @@ CSV_FILE = os.path.join(BASE_DIR, "Реестр_приказов_и_разряд
 MD_FILE = os.path.join(BASE_DIR, "Реестр_приказов_и_разрядов.md")
 PHOTOS_DIR = os.path.join(BASE_DIR, "photos")
 
+from db import (
+    load_data_from_db_or_json,
+    save_order_and_athletes_to_postgres,
+    is_postgres_connected,
+    get_database_url
+)
+
 # Load Data
 @st.cache_data
 def load_data():
-    if os.path.exists(JSON_FILE):
-        with open(JSON_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        df_ath = pd.DataFrame(data["athletes"])
-        df_ord = pd.DataFrame(data["orders"])
-        df_stu = pd.DataFrame(data.get("students", []))
-        return df_ath, df_ord, df_stu
-    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    df_ath, df_ord, df_stu, is_pg = load_data_from_db_or_json(JSON_FILE)
+    return df_ath, df_ord, df_stu, is_pg
 
-df_athletes, df_orders, df_students = load_data()
+df_athletes, df_orders, df_students, is_postgres_active = load_data()
 
 if df_athletes.empty:
-    st.error("Файл данных не найден. Убедитесь, что 'Реестр_приказов_и_разрядов.json' находится в папке приложения.")
+    st.error("Данные реестра не найдены. Убедитесь, что 'Реестр_приказов_и_разрядов.json' находится в папке приложения или настроена база PostgreSQL.")
     st.stop()
 
 import subprocess
@@ -422,25 +423,6 @@ def save_registry_files(json_data, base_dir=BASE_DIR):
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines) + "\n")
-
-def run_git_sync(repo_dir=BASE_DIR, commit_msg=None):
-    if not commit_msg:
-        commit_msg = f"feat: обновление реестра разрядов ({pd.Timestamp.now().strftime('%d.%m.%Y %H:%M')})"
-    try:
-        r1 = subprocess.run(["git", "add", "."], cwd=repo_dir, capture_output=True, text=True)
-        st_res = subprocess.run(["git", "status", "--porcelain"], cwd=repo_dir, capture_output=True, text=True)
-        if not st_res.stdout.strip():
-            return True, "Рабочее дерево чисто. Все файлы актуальны."
-        r2 = subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir, capture_output=True, text=True)
-        if r2.returncode != 0:
-            return False, f"Ошибка git commit:\n{r2.stderr}\n{r2.stdout}"
-        r3 = subprocess.run(["git", "push", "origin", "main"], cwd=repo_dir, capture_output=True, text=True)
-        if r3.returncode == 0:
-            return True, f"Успешно выгружено на GitHub!\n{r3.stdout}"
-        else:
-            return False, f"Ошибка при git push:\n{r3.stderr}\n{r3.stdout}"
-    except Exception as e:
-        return False, f"Ошибка выполнения git: {str(e)}"
 
 # Helper for initials
 def get_initials(fio):
@@ -1218,26 +1200,17 @@ with tab_upload:
                 key="editor_athletes"
             )
 
-    # 4. SAVE & GIT PUSH
+    # 4. SAVE TO DATABASE
     with st.container(border=True):
-        st.markdown("##### 4️⃣ Сохранение в реестр и выгрузка на GitHub")
+        st.markdown("##### 4️⃣ Сохранение в базу данных")
         
-        auto_push = st.checkbox("🚀 Автоматически выгрузить на GitHub (git push origin main) после сохранения", value=True, key="auto_push_cb")
-        
-        col_btn1, col_btn2 = st.columns([1, 1])
-        with col_btn1:
-            btn_save = st.button("💾 СОХРАНИТЬ ПРИКАЗ И РАЗРЯДЫ", type="primary", width='stretch', key="btn_save_order")
-        with col_btn2:
-            btn_push_only = st.button("🔄 Выполнить Git Push текущего состояния", width='stretch', key="btn_push_only")
+        if is_postgres_active:
+            st.success("🟢 **База данных PostgreSQL подключена.** Данные сохраняются напрямую в таблицы PostgreSQL.")
+        else:
+            st.info("ℹ️ **Локальный режим (JSON / Excel / CSV).** Для постоянного подключения к PostgreSQL укажите `DATABASE_URL` в переменных окружения или в настройках `st.secrets`.")
             
-        if btn_push_only:
-            with st.spinner("Синхронизация с GitHub..."):
-                ok, msg = run_git_sync(BASE_DIR)
-                if ok:
-                    st.success(f"✅ Синхронизация с GitHub успешно выполнена!\n\n`{msg}`")
-                else:
-                    st.error(f"❌ Ошибка синхронизации с GitHub:\n\n`{msg}`")
-                    
+        btn_save = st.button("💾 СОХРАНИТЬ ПРИКАЗ И РАЗРЯДЫ В БАЗУ ДАННЫХ", type="primary", width='stretch', key="btn_save_order")
+            
         if btn_save:
             # Validation
             if not in_order_num.strip():
@@ -1253,7 +1226,7 @@ with tab_upload:
                 if not valid_athletes:
                     st.error("Пожалуйста, добавьте хотя бы одного спортсмена в таблицу!")
                 else:
-                    with st.spinner("Сохранение приказа и разрядов в реестр..."):
+                    with st.spinner("Сохранение приказа и разрядов в базу данных..."):
                         date_str = in_order_date.strftime("%d.%m.%Y")
                         
                         # Save photo if uploaded
@@ -1269,11 +1242,7 @@ with tab_upload:
                                 f_out.write(uploaded_doc.getbuffer())
                             saved_photo_name = safe_filename
                             
-                        # Load current json
-                        with open(JSON_FILE, "r", encoding="utf-8") as f_j:
-                            current_data = json.load(f_j)
-                            
-                        # 1. Add order
+                        # 1. New order entry
                         new_order_entry = {
                             "org": in_org.strip(),
                             "num": in_order_num.strip(),
@@ -1283,11 +1252,16 @@ with tab_upload:
                             "count": len(valid_athletes),
                             "file": saved_photo_name
                         }
-                        # Prepend new order
+                        
+                        # Load current json for fallback & local exports
+                        current_data = {"orders": [], "athletes": [], "students": []}
+                        if os.path.exists(JSON_FILE):
+                            with open(JSON_FILE, "r", encoding="utf-8") as f_j:
+                                current_data = json.load(f_j)
+                                
                         current_data["orders"].insert(0, new_order_entry)
                         
                         # 2. Add athletes
-                        # Build lookup map for existing students to update
                         stu_map = {s["fio"].strip().lower(): s for s in current_data.get("students", [])}
                         
                         new_athletes_entries = []
@@ -1354,22 +1328,24 @@ with tab_upload:
                         # Prepend new athletes to maintain latest on top
                         current_data["athletes"] = new_athletes_entries + current_data["athletes"]
                         
-                        # Save all files (JSON, CSV, XLSX, MD)
+                        # Save to PostgreSQL if active
+                        pg_msg = ""
+                        if is_postgres_active:
+                            ok_pg = save_order_and_athletes_to_postgres(new_order_entry, new_athletes_entries)
+                            if ok_pg:
+                                pg_msg = "🟢 Записано в базу данных PostgreSQL!"
+                            else:
+                                pg_msg = "⚠️ Не удалось сохранить в PostgreSQL, сохранено в локальные файлы."
+                                
+                        # Save all files (JSON, CSV, XLSX, MD) for backup & export
                         save_registry_files(current_data, base_dir=BASE_DIR)
                         
-                        # Git push if requested
-                        git_status_msg = ""
-                        if auto_push:
-                            ok_git, g_msg = run_git_sync(BASE_DIR, commit_msg=f"feat: добавлен приказ {in_order_num} от {date_str} ({len(valid_athletes)} спортсменов)")
-                            if ok_git:
-                                git_status_msg = "🚀 Изменения успешно отправлены на GitHub! Streamlit Cloud автоматически обновит сайт через минуту."
-                            else:
-                                git_status_msg = f"⚠️ Данные сохранены локально, но при git push возникла ошибка: {g_msg}"
-                                
                         # Clear cache and inform user
                         st.cache_data.clear()
                         st.session_state["order_athletes_list"] = [
                             {"ФИО": "", "Разряд": "1 юношеский разряд", "Дата рождения": "", "Филиал": "", "Договор": "", "Примечания": ""}
                         ]
-                        st.success(f"🎉 Приказ **{in_order_num}** успешно внесен! Добавлено **{len(valid_athletes)}** спортсменов.\n\n{git_status_msg}")
+                        
+                        pg_info = f"\n\n{pg_msg}" if pg_msg else ""
+                        st.success(f"🎉 Приказ **{in_order_num}** успешно сохранен! Добавлено **{len(valid_athletes)}** спортсменов.{pg_info}")
                         st.button("🔄 Обновить страницу и увидеть данные в реестре", on_click=lambda: st.rerun())
