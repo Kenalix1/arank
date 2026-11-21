@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def load_data_from_db_or_json(json_file_path: str):
     """
     Loads athletes, orders, and students.
-    If PostgreSQL is connected, loads from DB (and auto-seeds from json if DB is empty).
+    If PostgreSQL is connected, synchronizes missing records from JSON and loads from DB.
     Otherwise loads from json_file_path.
     Returns: (df_athletes, df_orders, df_students, is_postgres_active)
     """
@@ -19,12 +19,11 @@ def load_data_from_db_or_json(json_file_path: str):
     if engine and is_postgres_connected():
         init_db(engine)
         try:
-            with engine.connect() as conn:
-                ath_count = conn.execute(text("SELECT count(*) FROM athletes")).scalar()
-                # If table is empty, auto-seed from json
-                if (ath_count is None or ath_count == 0) and os.path.exists(json_file_path):
-                    migrate_json_to_db(json_file_path, engine)
+            # Sync any new records from JSON into PostgreSQL
+            if os.path.exists(json_file_path):
+                migrate_json_to_db(json_file_path, engine)
                 
+            with engine.connect() as conn:
                 df_ath = pd.read_sql("SELECT * FROM athletes ORDER BY id DESC", conn)
                 df_ord = pd.read_sql("SELECT * FROM orders ORDER BY id DESC", conn)
                 df_stu = pd.read_sql("SELECT * FROM students ORDER BY id ASC", conn)
@@ -57,7 +56,12 @@ def load_data_from_db_or_json(json_file_path: str):
     return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), False
 
 def migrate_json_to_db(json_file_path: str, engine=None):
-    """Migrates records from JSON file into PostgreSQL tables."""
+    """
+    Intelligently synchronizes records from JSON file into PostgreSQL tables:
+    - Inserts missing orders from JSON into PostgreSQL.
+    - Inserts missing athletes/judges from JSON into PostgreSQL.
+    - Updates student records and qualifications.
+    """
     if engine is None:
         engine = get_db_engine()
     if engine is None or not os.path.exists(json_file_path):
@@ -67,72 +71,114 @@ def migrate_json_to_db(json_file_path: str, engine=None):
         data = json.load(f)
         
     with engine.begin() as conn:
-        c = conn.execute(text("SELECT count(*) FROM athletes")).scalar()
-        if c and c > 0:
-            return True # already migrated
+        # 1. Orders sync
+        try:
+            existing_orders_res = conn.execute(text("SELECT org, num, date FROM orders")).fetchall()
+            existing_orders = set((r[0] or "", r[1] or "", r[2] or "") for r in existing_orders_res)
+        except Exception:
+            existing_orders = set()
             
         for o in data.get("orders", []):
-            conn.execute(
-                orders_table.insert().values(
-                    org=o.get("org", ""),
-                    num=o.get("num", ""),
-                    date=o.get("date", ""),
-                    city=o.get("city", ""),
-                    subj=o.get("subj", ""),
-                    count=o.get("count", 0),
-                    file=o.get("file", "")
+            o_key = (o.get("org") or "", o.get("num") or "", o.get("date") or "")
+            if o_key not in existing_orders:
+                conn.execute(
+                    orders_table.insert().values(
+                        org=o.get("org", ""),
+                        num=o.get("num", ""),
+                        date=o.get("date", ""),
+                        city=o.get("city", ""),
+                        subj=o.get("subj", ""),
+                        count=o.get("count", 0),
+                        file=o.get("file", "")
+                    )
                 )
+                existing_orders.add(o_key)
+                
+        # 2. Athletes & Judges sync
+        try:
+            existing_ath_res = conn.execute(text("SELECT fio, order_num, order_date, rank FROM athletes")).fetchall()
+            existing_athletes = set(
+                ((r[0] or "").strip().lower(), (r[1] or "").strip(), (r[2] or "").strip(), (r[3] or "").strip())
+                for r in existing_ath_res
             )
+        except Exception:
+            existing_athletes = set()
             
         for a in data.get("athletes", []):
-            by = a.get("birth_year")
-            try:
-                by = int(by) if by else None
-            except:
-                by = None
-            conn.execute(
-                athletes_table.insert().values(
-                    fio=a.get("fio", ""),
-                    birth_year=by,
-                    birth_date=str(a.get("birth_date", "")),
-                    rank=a.get("rank", ""),
-                    rank_type=a.get("rank_type", ""),
-                    order_num=a.get("order_num", ""),
-                    order_date=a.get("order_date", ""),
-                    org=a.get("org", ""),
-                    city=a.get("city", ""),
-                    competition=a.get("competition", ""),
-                    discipline=a.get("discipline", ""),
-                    place=a.get("place", ""),
-                    club=a.get("club", ""),
-                    notes=a.get("notes", ""),
-                    student_branch=a.get("student_branch", ""),
-                    student_contract=a.get("student_contract", "")
+            fio = (a.get("fio") or "").strip()
+            onum = (a.get("order_num") or "").strip()
+            odate = (a.get("order_date") or "").strip()
+            rnk = (a.get("rank") or "").strip()
+            a_key = (fio.lower(), onum, odate, rnk)
+            if a_key not in existing_athletes:
+                by = a.get("birth_year")
+                try:
+                    by = int(by) if by else None
+                except:
+                    by = None
+                conn.execute(
+                    athletes_table.insert().values(
+                        fio=fio,
+                        birth_year=by,
+                        birth_date=str(a.get("birth_date", "")),
+                        rank=rnk,
+                        rank_type=a.get("rank_type", ""),
+                        order_num=onum,
+                        order_date=odate,
+                        org=a.get("org", ""),
+                        city=a.get("city", ""),
+                        competition=a.get("competition", ""),
+                        discipline=a.get("discipline", ""),
+                        place=a.get("place", ""),
+                        club=a.get("club", ""),
+                        notes=a.get("notes", ""),
+                        student_branch=a.get("student_branch", ""),
+                        student_contract=a.get("student_contract", "")
+                    )
                 )
-            )
+                existing_athletes.add(a_key)
+                
+        # 3. Students sync
+        try:
+            existing_students_res = conn.execute(text("SELECT lower(fio) FROM students")).fetchall()
+            existing_students = set(r[0] for r in existing_students_res if r[0])
+        except Exception:
+            existing_students = set()
             
         for s in data.get("students", []):
+            s_fio = (s.get("fio") or "").strip()
+            if not s_fio:
+                continue
             by = s.get("birth_year")
             try:
                 by = int(by) if by else None
             except:
                 by = None
             ranks_json = json.dumps(s.get("ranks", []), ensure_ascii=False)
-            conn.execute(
-                students_table.insert().values(
-                    fio=s.get("fio", ""),
-                    fam=s.get("fam", ""),
-                    imya=s.get("imya", ""),
-                    otch=s.get("otch", ""),
-                    birth_year=by,
-                    birth_date=str(s.get("birth_date", "")),
-                    branch=s.get("branch", ""),
-                    contract=s.get("contract", ""),
-                    notes=s.get("notes", ""),
-                    has_rank=bool(s.get("has_rank", False)),
-                    ranks=ranks_json
+            
+            if s_fio.lower() not in existing_students:
+                conn.execute(
+                    students_table.insert().values(
+                        fio=s_fio,
+                        fam=s.get("fam", ""),
+                        imya=s.get("imya", ""),
+                        otch=s.get("otch", ""),
+                        birth_year=by,
+                        birth_date=str(s.get("birth_date", "")),
+                        branch=s.get("branch", ""),
+                        contract=s.get("contract", ""),
+                        notes=s.get("notes", ""),
+                        has_rank=bool(s.get("has_rank", False)),
+                        ranks=ranks_json
+                    )
                 )
-            )
+                existing_students.add(s_fio.lower())
+            else:
+                if s.get("has_rank"):
+                    conn.execute(
+                        text("UPDATE students SET has_rank = TRUE, ranks = :rnk WHERE lower(fio) = lower(:fio)"),
+                        {"rnk": ranks_json, "fio": s_fio}
+                    )
     return True
 
 def save_order_and_athletes_to_postgres(order_dict: dict, athletes_list: list, engine=None):

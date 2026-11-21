@@ -28,12 +28,19 @@ st.set_page_config(
 # Apply global dark glassmorphism styling
 inject_custom_css()
 
-# Data Loading with caching
-@st.cache_data(show_spinner=False)
-def load_data():
+import os
+
+# Data Loading with dynamic caching
+def get_cache_token():
+    mtime = os.path.getmtime(JSON_FILE) if os.path.exists(JSON_FILE) else 0
+    size = os.path.getsize(JSON_FILE) if os.path.exists(JSON_FILE) else 0
+    return f"{mtime}_{size}"
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_data(token: str):
     return load_data_from_db_or_json(JSON_FILE)
 
-df_athletes, df_orders, df_students, is_postgres_active = load_data()
+df_athletes, df_orders, df_students, is_postgres_active = load_data(get_cache_token())
 
 if df_athletes.empty:
     st.error("Ошибка загрузки данных: реестр пуст или файл поврежден.")
@@ -41,7 +48,7 @@ if df_athletes.empty:
 
 # Header & KPIs
 render_hero_banner()
-render_kpi_metrics(df_athletes, df_students)
+render_kpi_metrics(df_athletes, df_students, is_postgres_active)
 
 # Sidebar (Filters & Exports)
 filtered_df, selected_main_cols = render_sidebar(df_athletes)

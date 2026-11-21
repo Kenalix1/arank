@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-def render_kpi_metrics(df_athletes: pd.DataFrame, df_students: pd.DataFrame):
+def render_kpi_metrics(df_athletes: pd.DataFrame, df_students: pd.DataFrame, is_postgres_active: bool = False):
     """Renders the top summary KPI cards including sports and referee qualifications."""
     total_entries = len(df_athletes)
     unique_people = df_athletes["fio"].nunique()

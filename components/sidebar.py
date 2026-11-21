@@ -131,4 +131,9 @@ def render_sidebar(df_athletes: pd.DataFrame):
                 width='stretch'
             )
 
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Сбросить кэш и обновить", width='stretch', help="Принудительно очистить кэш памяти и перезагрузить актуальные данные из реестра/БД"):
+        st.cache_data.clear()
+        st.rerun()
+
     return filtered_df, selected_main_cols
