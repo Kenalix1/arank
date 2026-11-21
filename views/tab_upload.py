@@ -1,29 +1,160 @@
 import os
 import json
+from datetime import datetime, date
 import streamlit as st
 import pandas as pd
 from config import BASE_DIR, PHOTOS_DIR, JSON_FILE, KNOWN_RANKS
 from services.ranks import determine_rank_type
+from services.ocr import (
+    recognize_and_parse_document,
+    parse_order_text,
+    get_gemini_api_key,
+    normalize_name
+)
 from database import save_order_and_athletes_to_postgres, save_registry_files
 
 def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
-    """Renders Tab 6: Внесение официального приказа и присвоения спортивных / судейских разрядов."""
-    st.markdown("#### 📥 Внесение приказа и присвоения спортивных / судейских разрядов")
-    st.caption("Заполните реквизиты приказа, прикрепите скан или фото документа и укажите спортсменов или судей. Данные сохраняются в базу данных.")
+    """Renders Tab 6: Внесение приказа с авто-распознаванием по фото и ручной проверкой."""
+    st.markdown("#### 📥 Авто-распознавание приказа по фото и внесение в базу")
+    st.caption("Загрузите фотокопию или скан приказа — система автоматически распознает реквизиты, разряды и список участников, сопоставит их с базой учеников и предложит вам проверить и при необходимости внести ручные правки.")
     
-    # 1. ORDER METADATA
+    # Initialize session state for metadata and athletes
+    if "order_athletes_list" not in st.session_state:
+        st.session_state["order_athletes_list"] = [
+            {"ФИО": "", "Разряд": "1 юношеский разряд", "Дата рождения": "", "Филиал": "", "Договор": "", "Примечания": ""}
+        ]
+        
+    if "auto_order_num" not in st.session_state:
+        st.session_state["auto_order_num"] = ""
+    if "auto_order_date" not in st.session_state:
+        st.session_state["auto_order_date"] = date.today()
+    if "auto_city" not in st.session_state:
+        st.session_state["auto_city"] = "г. Ростов-на-Дону"
+    if "auto_org" not in st.session_state:
+        st.session_state["auto_org"] = "РФСОО «Федерация гонок дронов Ростовской области»"
+    if "auto_subj" not in st.session_state:
+        st.session_state["auto_subj"] = "Присвоение спортивных / юношеских разрядов и судейских категорий по гонкам дронов"
+    if "auto_disc" not in st.session_state:
+        st.session_state["auto_disc"] = "Гонки дронов"
+    if "auto_place" not in st.session_state:
+        st.session_state["auto_place"] = "Выполнение нормы ЕВСК / Квалификационные требования"
+
+    # ==========================================
+    # 1. PHOTO UPLOAD & AUTOMATIC RECOGNITION
+    # ==========================================
     with st.container(border=True):
-        st.markdown("##### 1️⃣ Реквизиты приказа / документа")
+        st.markdown("##### 1️⃣ Загрузка фото / скана документа и авто-распознавание")
+        
+        col_up1, col_up2 = st.columns([1, 1], gap="medium")
+        
+        with col_up1:
+            uploaded_doc = st.file_uploader(
+                "Прикрепите фото или скан приказа (JPG, PNG, PDF):",
+                type=["jpg", "jpeg", "png", "webp", "pdf"],
+                help="Файл сохраняется в каталог photos/ и прикрепляется к приказу в реестре.",
+                key="uploaded_doc"
+            )
+            
+            if uploaded_doc is not None and uploaded_doc.type.startswith("image/"):
+                st.image(uploaded_doc, caption=f"Загруженный файл: {uploaded_doc.name}", width='stretch')
+            elif uploaded_doc is not None:
+                st.info(f"📄 Загружен документ: **{uploaded_doc.name}** ({round(uploaded_doc.size / 1024, 1)} КБ)")
+
+        with col_up2:
+            st.markdown("**Автоматическое извлечение данных из документа:**")
+            st.caption("Система автоматически распознает номер, дату, организацию, город и таблицу спортсменов/судей с приведением ФИО к именительному падежу.")
+            
+            btn_auto_parse = st.button(
+                "✨ АВТОМАТИЧЕСКИ РАСПОЗНАТЬ И ЗАПОЛНИТЬ ИЗ ФОТО",
+                type="primary",
+                width='stretch',
+                disabled=(uploaded_doc is None),
+                key="btn_run_auto_ocr"
+            )
+            
+            with st.expander("⚙️ Настройка AI-модели (Google Gemini / Бесплатный OCR)", expanded=False):
+                st.caption("По умолчанию работает встроенный бесплатный OCR-сервер. Для максимальной точности сложных сканов можно подключить бесплатный ключ Google Gemini Vision.")
+                custom_key = st.text_input(
+                    "Google Gemini API Key (необязательно):",
+                    value=get_gemini_api_key(),
+                    type="password",
+                    help="Бесплатный ключ создаётся за 1 минуту на https://aistudio.google.com/",
+                    key="input_gemini_api_key"
+                )
+                if custom_key:
+                    st.session_state["custom_gemini_api_key"] = custom_key
+                    
+            with st.expander("📋 Или вставить распознанный текст вручную (Live Text)", expanded=False):
+                pasted_text = st.text_area("Вставьте текст приказа из буфера:", height=100, placeholder="Скопируйте текст из фото на iPhone/Mac и вставьте сюда...")
+                if st.button("Разобрать вставленный текст"):
+                    if pasted_text.strip():
+                        parsed = parse_order_text(pasted_text, student_names=df_students["fio"].tolist() if not df_students.empty else [])
+                        _apply_parsed_data(parsed, df_students, "Ручной текст")
+                        st.rerun()
+
+            if btn_auto_parse and uploaded_doc is not None:
+                with st.spinner("🔍 Сканирование документа, распознавание текста и распределение по полям..."):
+                    img_bytes = uploaded_doc.getvalue()
+                    mime_type = uploaded_doc.type or "image/jpeg"
+                    gemini_key = get_gemini_api_key()
+                    
+                    parsed_result, engine_name = recognize_and_parse_document(
+                        image_bytes=img_bytes,
+                        mime_type=mime_type,
+                        gemini_api_key=gemini_key,
+                        df_students=df_students
+                    )
+                    
+                    if parsed_result:
+                        _apply_parsed_data(parsed_result, df_students, engine_name)
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Не удалось распознать документ автоматически. Проверьте четкость изображения или вставьте текст документа вручную.")
+
+    # Show notification if recognition just succeeded
+    if "ocr_notice" in st.session_state and st.session_state["ocr_notice"]:
+        st.success(st.session_state["ocr_notice"])
+
+    # ==========================================
+    # 2. ORDER METADATA (EDITABLE)
+    # ==========================================
+    with st.container(border=True):
+        st.markdown("##### 2️⃣ Реквизиты приказа (проверьте и при необходимости исправьте)")
+        
         col_u1, col_u2, col_u3 = st.columns([1, 1, 1])
         with col_u1:
-            in_order_num = st.text_input("Номер приказа *", placeholder="например: № 16-ФГДРО или № 125-ПСР", key="in_order_num")
+            in_order_num = st.text_input(
+                "Номер приказа *",
+                value=st.session_state.get("auto_order_num", ""),
+                placeholder="например: № 124-ПСР или № 16-ФГДРО",
+                key="in_order_num"
+            )
         with col_u2:
-            in_order_date = st.date_input("Дата приказа *", format="DD.MM.YYYY", key="in_order_date")
+            default_d = st.session_state.get("auto_order_date", date.today())
+            if isinstance(default_d, str):
+                try:
+                    default_d = datetime.strptime(default_d, "%d.%m.%Y").date()
+                except:
+                    default_d = date.today()
+            in_order_date = st.date_input(
+                "Дата приказа *",
+                value=default_d,
+                format="DD.MM.YYYY",
+                key="in_order_date"
+            )
         with col_u3:
             city_suggestions = ["г. Ростов-на-Дону", "г. Батайск", "г. Азов", "г. Новочеркасск", "Аксайский район", "г. Таганрог", "г. Шахты"]
-            in_city = st.selectbox("Город / Муниципалитет *", options=city_suggestions + ["Другой (ввести вручную)"], key="in_city")
+            cur_city = st.session_state.get("auto_city", "г. Ростов-на-Дону")
+            city_idx = city_suggestions.index(cur_city) if cur_city in city_suggestions else len(city_suggestions)
+            
+            in_city = st.selectbox(
+                "Город / Муниципалитет *",
+                options=city_suggestions + ["Другой (ввести вручную)"],
+                index=city_idx,
+                key="in_city"
+            )
             if in_city == "Другой (ввести вручную)":
-                in_city = st.text_input("Введите город / район:", value="г. Ростов-на-Дону", key="in_city_custom")
+                in_city = st.text_input("Введите город / район:", value=cur_city, key="in_city_custom")
                 
         col_u4, col_u5 = st.columns([1, 1])
         with col_u4:
@@ -35,11 +166,24 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                 "УФКС Администрации г. Новочеркасска",
                 "ДОСААФ"
             ]
-            in_org = st.selectbox("Орган власти / Федерация *", options=org_suggestions + ["Другая организация (ввести вручную)"], key="in_org")
+            cur_org = st.session_state.get("auto_org", "РФСОО «Федерация гонок дронов Ростовской области»")
+            org_idx = org_suggestions.index(cur_org) if cur_org in org_suggestions else len(org_suggestions)
+            
+            in_org = st.selectbox(
+                "Орган власти / Федерация *",
+                options=org_suggestions + ["Другая организация (ввести вручную)"],
+                index=org_idx,
+                key="in_org"
+            )
             if in_org == "Другая организация (ввести вручную)":
-                in_org = st.text_input("Введите наименование органа / федерации:", key="in_org_custom")
+                in_org = st.text_input("Введите наименование органа / федерации:", value=cur_org, key="in_org_custom")
+                
         with col_u5:
-            in_subj = st.text_input("Предмет приказа / основание", value="Присвоение спортивных / юношеских разрядов и судейских категорий по гонкам дронов", key="in_subj")
+            in_subj = st.text_input(
+                "Предмет приказа / основание",
+                value=st.session_state.get("auto_subj", "Присвоение спортивных / юношеских разрядов и судейских категорий по гонкам дронов"),
+                key="in_subj"
+            )
             
         col_u6, col_u7 = st.columns([1, 1])
         with col_u6:
@@ -50,127 +194,65 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                 "Гонки дронов (класс 200 мм)",
                 "Технический симулятор — гонки БВС"
             ]
-            in_disc = st.selectbox("Дисциплина / Направление (по умолчанию)", options=disc_suggestions + ["Другая"], key="in_disc")
+            cur_disc = st.session_state.get("auto_disc", "Гонки дронов")
+            disc_idx = disc_suggestions.index(cur_disc) if cur_disc in disc_suggestions else len(disc_suggestions)
+            
+            in_disc = st.selectbox(
+                "Дисциплина / Направление (по умолчанию)",
+                options=disc_suggestions + ["Другая"],
+                index=disc_idx,
+                key="in_disc"
+            )
             if in_disc == "Другая":
-                in_disc = st.text_input("Введите дисциплину:", value="Гонки дронов", key="in_disc_custom")
+                in_disc = st.text_input("Введите дисциплину:", value=cur_disc, key="in_disc_custom")
+                
         with col_u7:
-            in_base_place = st.text_input("Основание / результат (по умолчанию)", value="Выполнение нормы ЕВСК / Квалификационные требования", key="in_base_place")
+            in_base_place = st.text_input(
+                "Основание / результат (по умолчанию)",
+                value=st.session_state.get("auto_place", "Выполнение нормы ЕВСК / Квалификационные требования"),
+                key="in_base_place"
+            )
 
-    # 2. SCAN / PHOTO UPLOAD
+    # ==========================================
+    # 3. ATHLETES & JUDGES TABLE (EDITABLE)
+    # ==========================================
     with st.container(border=True):
-        st.markdown("##### 2️⃣ Фотокопия или скриншот документа")
-        uploaded_doc = st.file_uploader(
-            "Загрузите фотокопию или скриншот приказа (JPG, PNG, PDF):",
-            type=["jpg", "jpeg", "png", "webp", "pdf"],
-            help="Файл будет сохранен в каталог photos/ и привязан к приказу.",
-            key="uploaded_doc"
+        st.markdown("##### 3️⃣ Список участников и разрядов (проверьте и внесите правки)")
+        st.caption("Таблица заполнена автоматически. Вы можете отредактировать любые ФИО, изменить разряд через список, добавить новые строки `+` или удалить ошибочные:")
+        
+        df_editor_input = pd.DataFrame(st.session_state["order_athletes_list"])
+        
+        edited_athletes_df = st.data_editor(
+            df_editor_input,
+            num_rows="dynamic",
+            width='stretch',
+            column_config={
+                "ФИО": st.column_config.TextColumn("ФИО участника *", width="large", required=True),
+                "Разряд": st.column_config.SelectboxColumn("Присваиваемый разряд / категория *", options=KNOWN_RANKS, required=True, width="medium"),
+                "Дата рождения": st.column_config.TextColumn("Дата / Год рождения", width="medium"),
+                "Филиал": st.column_config.TextColumn("Филиал / Клуб", width="medium"),
+                "Договор": st.column_config.TextColumn("№ Договора", width="small"),
+                "Примечания": st.column_config.TextColumn("Примечание", width="medium"),
+            },
+            key="editor_athletes"
         )
-        if uploaded_doc is not None:
-            col_preview1, col_preview2 = st.columns([1, 2])
-            with col_preview1:
-                if uploaded_doc.type.startswith("image/"):
-                    st.image(uploaded_doc, caption=f"Предпросмотр: {uploaded_doc.name}", width='stretch')
-                else:
-                    st.info(f"📄 Загружен документ: **{uploaded_doc.name}** ({round(uploaded_doc.size / 1024, 1)} КБ)")
-            with col_preview2:
-                st.success(f"Файл готов к сохранению. Будет прикреплен к приказу {in_order_num or 'б/н'}.")
 
-    # 3. ATHLETES LIST (TEXT PARSER & DATA EDITOR)
-    with st.container(border=True):
-        st.markdown("##### 3️⃣ Список спортсменов / судей и присваиваемых квалификаций")
-        st.caption("Вы можете быстро вставить список текстом или отредактировать таблицу ниже. Поддерживаются как спортивные/юношеские разряды, так и судейские категории.")
-        
-        tab_input_text, tab_input_table = st.tabs(["📝 Быстрый ввод текстом списком", "📊 Таблица спортсменов и судей"])
-        
-        if "order_athletes_list" not in st.session_state:
-            st.session_state["order_athletes_list"] = [
-                {"ФИО": "", "Разряд": "1 юношеский разряд", "Дата рождения": "", "Филиал": "", "Договор": "", "Примечания": ""}
-            ]
-            
-        with tab_input_text:
-            text_placeholder = (
-                "# Вставьте список спортсменов или судей по одной строке.\n"
-                "# Формат строки: ФИО | Разряд или Судейская категория | Дата или Год рождения (необязательно)\n"
-                "# Примеры:\n"
-                "Аристархова Эвелина Игоревна | 3 спортивный разряд\n"
-                "Изюмов Кирилл Андреевич | Спортивный судья третьей категории\n"
-                "Хлыбов Василий Васильевич | Спортивный судья второй категории\n"
-                "Моргунова Мария Александровна | 1 юношеский разряд | 16.03.2015\n"
-            )
-            raw_text = st.text_area("Вставьте текст со списком:", height=150, placeholder=text_placeholder, key="raw_athletes_text")
-            if st.button("📋 Разобрать список и заполнить в таблицу", key="btn_parse_text"):
-                if raw_text.strip():
-                    parsed_rows = []
-                    stu_lookup = {}
-                    if not df_students.empty:
-                        for _, s_row in df_students.iterrows():
-                            clean_f = " ".join(str(s_row["fio"]).strip().split()).lower()
-                            stu_lookup[clean_f] = s_row
-                            
-                    lines = [line.strip() for line in raw_text.strip().split("\n") if line.strip() and not line.strip().startswith("#")]
-                    for line in lines:
-                        parts = [p.strip() for p in line.replace(";", "|").replace("\t", "|").split("|")]
-                        fio_val = parts[0] if len(parts) > 0 else ""
-                        rank_val = parts[1] if len(parts) > 1 else "1 юношеский разряд"
-                        birth_val = parts[2] if len(parts) > 2 else ""
-                        
-                        branch_val = ""
-                        contract_val = ""
-                        
-                        lookup_key = " ".join(fio_val.split()).lower()
-                        if lookup_key in stu_lookup:
-                            matched_s = stu_lookup[lookup_key]
-                            if not birth_val:
-                                birth_val = str(matched_s.get("birth_date") or matched_s.get("birth_year") or "")
-                            branch_val = str(matched_s.get("branch") or "")
-                            contract_val = str(matched_s.get("contract") or "")
-                            
-                        parsed_rows.append({
-                            "ФИО": fio_val,
-                            "Разряд": rank_val,
-                            "Дата рождения": birth_val,
-                            "Филиал": branch_val,
-                            "Договор": contract_val,
-                            "Примечания": ""
-                        })
-                    if parsed_rows:
-                        st.session_state["order_athletes_list"] = parsed_rows
-                        st.success(f"Успешно распознано {len(parsed_rows)} записей! Перейдите на вкладку таблицы для проверки.")
-                        st.rerun()
-
-        with tab_input_table:
-            st.caption("Здесь можно отредактировать строки, изменить разряды/судейские категории или добавить новых участников:")
-            df_editor_input = pd.DataFrame(st.session_state["order_athletes_list"])
-            
-            edited_athletes_df = st.data_editor(
-                df_editor_input,
-                num_rows="dynamic",
-                width='stretch',
-                column_config={
-                    "ФИО": st.column_config.TextColumn("ФИО участника *", width="large", required=True),
-                    "Разряд": st.column_config.SelectboxColumn("Присваиваемый разряд / категория *", options=KNOWN_RANKS, required=True, width="medium"),
-                    "Дата рождения": st.column_config.TextColumn("Дата / Год рождения", width="medium"),
-                    "Филиал": st.column_config.TextColumn("Филиал / Клуб", width="medium"),
-                    "Договор": st.column_config.TextColumn("№ Договора", width="small"),
-                    "Примечания": st.column_config.TextColumn("Примечание", width="medium"),
-                },
-                key="editor_athletes"
-            )
-
+    # ==========================================
     # 4. SAVE TO DATABASE
+    # ==========================================
     with st.container(border=True):
-        st.markdown("##### 4️⃣ Сохранение в базу данных")
+        st.markdown("##### 4️⃣ Сохранение проверенных данных в базу")
         
         if is_postgres_active:
-            st.success("🟢 **База данных PostgreSQL подключена.** Данные сохраняются напрямую в таблицы PostgreSQL.")
+            st.success("🟢 **База данных PostgreSQL подключена.** Приказ и разряды будут сохранены в таблицы PostgreSQL.")
         else:
-            st.info("ℹ️ **Локальный режим (JSON / Excel / CSV).** Для постоянного подключения к PostgreSQL укажите `DATABASE_URL` в переменных окружения или в настройках `st.secrets`.")
+            st.info("ℹ️ **Локальный режим (JSON / Excel / CSV).** Для постоянного подключения к PostgreSQL укажите `DATABASE_URL` в переменных окружения или `st.secrets`.")
             
         btn_save = st.button("💾 СОХРАНИТЬ ПРИКАЗ И РАЗРЯДЫ В БАЗУ ДАННЫХ", type="primary", width='stretch', key="btn_save_order")
             
         if btn_save:
             if not in_order_num.strip():
-                st.error("Пожалуйста, укажите номер приказа (например, № 16-ФГДРО)!")
+                st.error("Пожалуйста, укажите номер приказа (например: № 124-ПСР)!")
             else:
                 valid_athletes = []
                 for _, r in edited_athletes_df.iterrows():
@@ -288,11 +370,82 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                                 
                         save_registry_files(current_data, base_dir=BASE_DIR)
                         
+                        # Reset session state after save
                         st.cache_data.clear()
                         st.session_state["order_athletes_list"] = [
                             {"ФИО": "", "Разряд": "1 юношеский разряд", "Дата рождения": "", "Филиал": "", "Договор": "", "Примечания": ""}
                         ]
+                        st.session_state["auto_order_num"] = ""
+                        st.session_state["auto_order_date"] = date.today()
+                        st.session_state["ocr_notice"] = ""
                         
                         pg_info = f"\n\n{pg_msg}" if pg_msg else ""
                         st.success(f"🎉 Приказ **{in_order_num}** успешно сохранен! Добавлено **{len(valid_athletes)}** записей.{pg_info}")
                         st.button("🔄 Обновить страницу и увидеть данные в реестре", on_click=lambda: st.rerun())
+
+def _apply_parsed_data(parsed: dict, df_students: pd.DataFrame, engine_name: str):
+    """Helper to populate session state from parsed dictionary."""
+    if not parsed:
+        return
+        
+    st.session_state["auto_order_num"] = parsed.get("order_num", "")
+    
+    date_str = parsed.get("order_date", "")
+    if date_str:
+        try:
+            st.session_state["auto_order_date"] = datetime.strptime(date_str, "%d.%m.%Y").date()
+        except:
+            st.session_state["auto_order_date"] = date.today()
+            
+    if parsed.get("city"):
+        st.session_state["auto_city"] = parsed.get("city")
+    if parsed.get("org"):
+        st.session_state["auto_org"] = parsed.get("org")
+    if parsed.get("subj"):
+        st.session_state["auto_subj"] = parsed.get("subj")
+    if parsed.get("discipline"):
+        st.session_state["auto_disc"] = parsed.get("discipline")
+    if parsed.get("base_place"):
+        st.session_state["auto_place"] = parsed.get("base_place")
+        
+    # Match students
+    stu_lookup = {}
+    if df_students is not None and not df_students.empty:
+        for _, s_row in df_students.iterrows():
+            clean_f = " ".join(str(s_row["fio"]).strip().split()).lower()
+            stu_lookup[clean_f] = s_row
+            
+    parsed_athletes = parsed.get("athletes", [])
+    athletes_rows = []
+    
+    for a in parsed_athletes:
+        fio_val = normalize_name(a.get("fio", ""))
+        rank_val = a.get("rank", "1 юношеский разряд")
+        birth_val = a.get("birth_date", "")
+        branch_val = ""
+        contract_val = ""
+        
+        lookup_key = " ".join(fio_val.split()).lower()
+        if lookup_key in stu_lookup:
+            matched_s = stu_lookup[lookup_key]
+            if not birth_val:
+                birth_val = str(matched_s.get("birth_date") or matched_s.get("birth_year") or "")
+            branch_val = str(matched_s.get("branch") or "")
+            contract_val = str(matched_s.get("contract") or "")
+            
+        athletes_rows.append({
+            "ФИО": fio_val,
+            "Разряд": rank_val,
+            "Дата рождения": birth_val,
+            "Филиал": branch_val,
+            "Договор": contract_val,
+            "Примечания": a.get("notes", "")
+        })
+        
+    if athletes_rows:
+        st.session_state["order_athletes_list"] = athletes_rows
+        
+    st.session_state["ocr_notice"] = (
+        f"🎯 Документ успешно распознан движком **{engine_name}**! "
+        f"Найдено: **{len(athletes_rows)}** участников. Данные распределены по полям ниже — проверьте и внесите ручные правки при необходимости."
+    )
