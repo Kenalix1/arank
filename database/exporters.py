@@ -53,6 +53,9 @@ def save_registry_files(json_data: dict, base_dir: str = BASE_DIR):
         sport_df.to_excel(writer, sheet_name="Спортивные разряды", index=False)
         junior_df = csv_out[csv_out["Категория"] == "Юношеский"]
         junior_df.to_excel(writer, sheet_name="Юношеские разряды", index=False)
+        judge_df = csv_out[csv_out["Категория"] == "Судейская категория"]
+        if not judge_df.empty:
+            judge_df.to_excel(writer, sheet_name="Судейские категории", index=False)
         if not df_stu.empty:
             stu_out = df_stu.copy()
             stu_out["Присвоенные разряды"] = stu_out["ranks"].apply(lambda r: ", ".join(r) if r else "-")
@@ -65,6 +68,7 @@ def save_registry_files(json_data: dict, base_dir: str = BASE_DIR):
     total_orders = len(df_ord)
     sport_count = (df_ath["rank_type"] == "Спортивный").sum()
     junior_count = (df_ath["rank_type"] == "Юношеский").sum()
+    judge_count = (df_ath["rank_type"] == "Судейская категория").sum()
 
     md_lines = [
         "# Реестр приказов и присвоенных разрядов по гонкам дронов (БВС)",
@@ -76,6 +80,7 @@ def save_registry_files(json_data: dict, base_dir: str = BASE_DIR):
         f"- **Всего документов (приказов/выписок):** {total_orders}",
         f"- **Спортивные разряды:** {sport_count}",
         f"- **Юношеские разряды:** {junior_count}",
+        f"- **Судейские категории:** {judge_count}",
         "",
         "## 1. Реестр документов (приказов)",
         "| № | Орган / Организация | Номер приказа | Дата | Город | Предмет приказа | Чел. | Файл(ы) фото |",

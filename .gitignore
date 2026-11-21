@@ -6,3 +6,10 @@ __pycache__/
 .AppleDouble
 .LSOverride
 Thumbs.db
+.swift_cache/
+*.pdf
+*raw.txt
+ocr_data.json
+ingest_atmos.py
+backend/
+frontend/
