@@ -1,27 +1,61 @@
 import pandas as pd
 import plotly.express as px
+from services.ranks import determine_rank_type
 
 def create_ranks_bar_chart(df_athletes: pd.DataFrame):
-    """Generates bar chart for distribution of assigned ranks."""
+    """Generates bar chart for distribution of assigned ranks and judging categories."""
     rank_only = df_athletes[df_athletes["rank"] != "Без разряда"]
     if rank_only.empty:
         return None
     rank_counts = rank_only["rank"].value_counts().reset_index()
-    rank_counts.columns = ["Разряд", "Количество"]
+    rank_counts.columns = ["Разряд / Категория", "Количество"]
     fig = px.bar(
         rank_counts,
-        x="Разряд",
+        x="Разряд / Категория",
         y="Количество",
-        color="Разряд",
-        title="<b>Распределение присвоенных разрядов</b>",
+        color="Разряд / Категория",
+        title="<b>Распределение спортивных разрядов и судейских категорий</b>",
         text="Количество",
         template="plotly_dark",
-        color_discrete_sequence=['#3B82F6', '#6366F1', '#F59E0B', '#10B981', '#8B5CF6']
+        color_discrete_sequence=['#3B82F6', '#10B981', '#6366F1', '#F59E0B', '#8B5CF6', '#14B8A6']
     )
     fig.update_layout(
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
         showlegend=False,
+        margin=dict(t=40, b=20, l=20, r=20),
+        font=dict(family="Plus Jakarta Sans", color="#E2E8F0")
+    )
+    return fig
+
+def create_qualification_types_pie_chart(df_athletes: pd.DataFrame):
+    """Generates donut chart for qualification types (Sports vs Junior vs Judges)."""
+    rank_only = df_athletes[df_athletes["rank"] != "Без разряда"].copy()
+    if rank_only.empty:
+        return None
+    rank_only["type_norm"] = rank_only["rank"].map(determine_rank_type)
+    type_counts = rank_only["type_norm"].value_counts().reset_index()
+    type_counts.columns = ["Тип квалификации", "Количество"]
+    
+    color_map = {
+        "Спортивный": "#818CF8",
+        "Юношеский": "#F59E0B",
+        "Судейская категория": "#10B981"
+    }
+    
+    fig = px.pie(
+        type_counts,
+        names="Тип квалификации",
+        values="Количество",
+        title="<b>Соотношение квалификаций: Спорт vs Судьи</b>",
+        hole=0.45,
+        template="plotly_dark",
+        color="Тип квалификации",
+        color_discrete_map=color_map
+    )
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
         margin=dict(t=40, b=20, l=20, r=20),
         font=dict(family="Plus Jakarta Sans", color="#E2E8F0")
     )

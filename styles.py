@@ -2,60 +2,68 @@ import streamlit as st
 
 CUSTOM_CSS = """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+    /* Global Typography & Dark Background */
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
     
     html, body, [class*="css"] {
         font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Dark Theme Background */
     .stApp {
-        background-color: #090D16 !important;
+        background-color: #0B0F19;
         color: #F1F5F9;
     }
 
-    /* Hero Banner Dark Glassmorphism */
+    /* Top Hero Banner Dark */
     .hero-container {
-        background: linear-gradient(135deg, #0F172A 0%, #131C31 40%, #1E1B4B 100%);
+        background: linear-gradient(135deg, #0F172A 0%, #1E1B4B 50%, #0F172A 100%);
+        border: 1px solid #1E293B;
         border-radius: 20px;
         padding: 32px 36px;
-        color: #FFFFFF;
-        box-shadow: 0 15px 35px -5px rgba(0, 0, 0, 0.6), 0 0 25px rgba(59, 130, 246, 0.1);
         margin-bottom: 24px;
+        box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.7);
         position: relative;
         overflow: hidden;
-        border: 1px solid rgba(59, 130, 246, 0.2);
+    }
+    
+    .hero-container::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -20%;
+        width: 400px;
+        height: 400px;
+        background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, transparent 70%);
+        border-radius: 50%;
+        pointer-events: none;
     }
     
     .hero-badge {
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        background: rgba(30, 58, 138, 0.4);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(96, 165, 250, 0.3);
-        padding: 5px 14px;
-        border-radius: 9999px;
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        background: rgba(59, 130, 246, 0.15);
         color: #60A5FA;
+        border: 1px solid rgba(59, 130, 246, 0.3);
+        padding: 6px 14px;
+        border-radius: 9999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
         margin-bottom: 12px;
     }
     
     .hero-title {
-        font-size: 2.25rem;
+        font-size: 2.2rem;
         font-weight: 800;
         letter-spacing: -0.02em;
+        color: #F8FAFC;
         margin-bottom: 8px;
-        background: linear-gradient(to right, #FFFFFF, #93C5FD);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
     }
     
     .hero-subtitle {
-        font-size: 1rem;
+        font-size: 1.05rem;
         color: #94A3B8;
         max-width: 800px;
         line-height: 1.5;
@@ -64,8 +72,8 @@ CUSTOM_CSS = """
     /* KPI Metrics Cards Dark */
     .kpi-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 14px;
         margin-bottom: 28px;
     }
     
@@ -73,7 +81,7 @@ CUSTOM_CSS = """
         background: #0F172A;
         border: 1px solid #1E293B;
         border-radius: 16px;
-        padding: 18px 20px;
+        padding: 16px 18px;
         box-shadow: 0 4px 15px -2px rgba(0, 0, 0, 0.4);
         transition: transform 0.2s ease, border-color 0.2s ease;
     }
@@ -95,7 +103,7 @@ CUSTOM_CSS = """
     }
     
     .kpi-label {
-        font-size: 0.8rem;
+        font-size: 0.78rem;
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -104,7 +112,7 @@ CUSTOM_CSS = """
     }
     
     .kpi-num {
-        font-size: 1.75rem;
+        font-size: 1.7rem;
         font-weight: 800;
         color: #F8FAFC;
     }
@@ -156,6 +164,12 @@ CUSTOM_CSS = """
         border: 1px solid rgba(59, 130, 246, 0.35);
     }
     
+    .rank-pill-judge {
+        background: rgba(16, 185, 129, 0.15);
+        color: #34D399;
+        border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    
     .rank-pill-none {
         background: rgba(148, 163, 184, 0.12);
         color: #94A3B8;
@@ -179,33 +193,41 @@ CUSTOM_CSS = """
         height: 12px;
         border-radius: 50%;
         background: #3B82F6;
-        border: 2px solid #090D16;
-        box-shadow: 0 0 8px #3B82F6;
+        border: 2px solid #0B0F19;
     }
 
-    /* Dark Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #0B0F19 !important;
-        border-right: 1px solid #1E293B !important;
+    .timeline-item-judge {
+        border-left: 2px solid #10B981;
+    }
+
+    .timeline-item-judge::before {
+        background: #10B981;
+    }
+
+    /* Smooth tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: transparent;
+        border-bottom: 1px solid #1E293B;
+        padding-bottom: 8px;
     }
     
-    /* Container borders dark */
-    [data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: #111827 !important;
-        border: 1px solid #1F2937 !important;
-        border-radius: 14px !important;
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px;
+        padding: 8px 16px;
+        font-weight: 600;
+        color: #94A3B8;
+        background: transparent;
+        border: none;
     }
-
-    /* Metric values dark */
-    [data-testid="stMetricValue"] {
-        color: #F8FAFC !important;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #94A3B8 !important;
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #1E293B !important;
+        color: #38BDF8 !important;
     }
 </style>
 """
 
 def inject_custom_css():
-    """Injects custom CSS styling for dark theme glassmorphism."""
+    """Injects global dark glassmorphism theme styles into Streamlit app."""
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)

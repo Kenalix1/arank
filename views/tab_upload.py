@@ -3,12 +3,13 @@ import json
 import streamlit as st
 import pandas as pd
 from config import BASE_DIR, PHOTOS_DIR, JSON_FILE, KNOWN_RANKS
+from services.ranks import determine_rank_type
 from database import save_order_and_athletes_to_postgres, save_registry_files
 
 def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
-    """Renders Tab 6: Внесение официального приказа и присвоения разрядов."""
-    st.markdown("#### 📥 Внесение официального приказа и присвоения разрядов")
-    st.caption("Заполните реквизиты приказа, прикрепите скан или фото документа и укажите спортсменов. Данные сохраняются в базу данных.")
+    """Renders Tab 6: Внесение официального приказа и присвоения спортивных / судейских разрядов."""
+    st.markdown("#### 📥 Внесение приказа и присвоения спортивных / судейских разрядов")
+    st.caption("Заполните реквизиты приказа, прикрепите скан или фото документа и укажите спортсменов или судей. Данные сохраняются в базу данных.")
     
     # 1. ORDER METADATA
     with st.container(border=True):
@@ -38,16 +39,22 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
             if in_org == "Другая организация (ввести вручную)":
                 in_org = st.text_input("Введите наименование органа / федерации:", key="in_org_custom")
         with col_u5:
-            in_subj = st.text_input("Предмет приказа / основание", value="Присвоение спортивных / юношеских разрядов по гонкам дронов", key="in_subj")
+            in_subj = st.text_input("Предмет приказа / основание", value="Присвоение спортивных / юношеских разрядов и судейских категорий по гонкам дронов", key="in_subj")
             
         col_u6, col_u7 = st.columns([1, 1])
         with col_u6:
-            disc_suggestions = ["Гонки дронов", "Гонки дронов (класс 75 мм)", "Гонки дронов (класс 200 мм)", "Технический симулятор — гонки БВС"]
-            in_disc = st.selectbox("Дисциплина (по умолчанию для всех)", options=disc_suggestions + ["Другая"], key="in_disc")
+            disc_suggestions = [
+                "Гонки дронов",
+                "Судейство соревнований",
+                "Гонки дронов (класс 75 мм)",
+                "Гонки дронов (класс 200 мм)",
+                "Технический симулятор — гонки БВС"
+            ]
+            in_disc = st.selectbox("Дисциплина / Направление (по умолчанию)", options=disc_suggestions + ["Другая"], key="in_disc")
             if in_disc == "Другая":
                 in_disc = st.text_input("Введите дисциплину:", value="Гонки дронов", key="in_disc_custom")
         with col_u7:
-            in_base_place = st.text_input("Основание / результат (по умолчанию)", value="Выполнение нормы ЕВСК", key="in_base_place")
+            in_base_place = st.text_input("Основание / результат (по умолчанию)", value="Выполнение нормы ЕВСК / Квалификационные требования", key="in_base_place")
 
     # 2. SCAN / PHOTO UPLOAD
     with st.container(border=True):
@@ -70,10 +77,10 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
 
     # 3. ATHLETES LIST (TEXT PARSER & DATA EDITOR)
     with st.container(border=True):
-        st.markdown("##### 3️⃣ Список спортсменов и присваиваемых разрядов")
-        st.caption("Вы можете быстро вставить список текстом или отредактировать таблицу ниже. При совпадении с базой учеников дата рождения, филиал и договор подтянутся автоматически.")
+        st.markdown("##### 3️⃣ Список спортсменов / судей и присваиваемых квалификаций")
+        st.caption("Вы можете быстро вставить список текстом или отредактировать таблицу ниже. Поддерживаются как спортивные/юношеские разряды, так и судейские категории.")
         
-        tab_input_text, tab_input_table = st.tabs(["📝 Быстрый ввод текстом списком", "📊 Таблица спортсменов"])
+        tab_input_text, tab_input_table = st.tabs(["📝 Быстрый ввод текстом списком", "📊 Таблица спортсменов и судей"])
         
         if "order_athletes_list" not in st.session_state:
             st.session_state["order_athletes_list"] = [
@@ -82,11 +89,12 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
             
         with tab_input_text:
             text_placeholder = (
-                "# Вставьте список спортсменов по одной строке.\n"
-                "# Формат строки: ФИО | Разряд | Дата или Год рождения (необязательно)\n"
+                "# Вставьте список спортсменов или судей по одной строке.\n"
+                "# Формат строки: ФИО | Разряд или Судейская категория | Дата или Год рождения (необязательно)\n"
                 "# Примеры:\n"
                 "Аристархова Эвелина Игоревна | 3 спортивный разряд\n"
-                "Изюмов Кирилл Андреевич | 3 спортивный разряд\n"
+                "Изюмов Кирилл Андреевич | Спортивный судья третьей категории\n"
+                "Хлыбов Василий Васильевич | Спортивный судья второй категории\n"
                 "Моргунова Мария Александровна | 1 юношеский разряд | 16.03.2015\n"
             )
             raw_text = st.text_area("Вставьте текст со списком:", height=150, placeholder=text_placeholder, key="raw_athletes_text")
@@ -127,11 +135,11 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                         })
                     if parsed_rows:
                         st.session_state["order_athletes_list"] = parsed_rows
-                        st.success(f"Успешно распознано {len(parsed_rows)} спортсменов! Перейдите на вкладку «Таблица спортсменов» для проверки.")
+                        st.success(f"Успешно распознано {len(parsed_rows)} записей! Перейдите на вкладку таблицы для проверки.")
                         st.rerun()
 
         with tab_input_table:
-            st.caption("Здесь можно отредактировать строки, изменить разряды или добавить новых участников:")
+            st.caption("Здесь можно отредактировать строки, изменить разряды/судейские категории или добавить новых участников:")
             df_editor_input = pd.DataFrame(st.session_state["order_athletes_list"])
             
             edited_athletes_df = st.data_editor(
@@ -139,8 +147,8 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                 num_rows="dynamic",
                 width='stretch',
                 column_config={
-                    "ФИО": st.column_config.TextColumn("ФИО спортсмена *", width="large", required=True),
-                    "Разряд": st.column_config.SelectboxColumn("Присваиваемый разряд *", options=KNOWN_RANKS, required=True, width="medium"),
+                    "ФИО": st.column_config.TextColumn("ФИО участника *", width="large", required=True),
+                    "Разряд": st.column_config.SelectboxColumn("Присваиваемый разряд / категория *", options=KNOWN_RANKS, required=True, width="medium"),
                     "Дата рождения": st.column_config.TextColumn("Дата / Год рождения", width="medium"),
                     "Филиал": st.column_config.TextColumn("Филиал / Клуб", width="medium"),
                     "Договор": st.column_config.TextColumn("№ Договора", width="small"),
@@ -171,9 +179,9 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                         valid_athletes.append(r)
                         
                 if not valid_athletes:
-                    st.error("Пожалуйста, добавьте хотя бы одного спортсмена в таблицу!")
+                    st.error("Пожалуйста, добавьте хотя бы одного человека в таблицу!")
                 else:
-                    with st.spinner("Сохранение приказа и разрядов в базу данных..."):
+                    with st.spinner("Сохранение приказа и квалификаций в базу данных..."):
                         date_str = in_order_date.strftime("%d.%m.%Y")
                         
                         saved_photo_name = "—"
@@ -207,7 +215,7 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                                 
                         current_data["orders"].insert(0, new_order_entry)
                         
-                        # 2. Add athletes
+                        # 2. Add athletes/judges
                         stu_map = {s["fio"].strip().lower(): s for s in current_data.get("students", [])}
                         
                         new_athletes_entries = []
@@ -229,8 +237,7 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                                 except:
                                     pass
                                     
-                            is_sport = "спортивный" in a_rank.lower() or a_rank in ["КМС", "МС", "МСМК"]
-                            rank_type_str = "Спортивный" if is_sport else "Юношеский"
+                            rank_type_str = determine_rank_type(a_rank)
                             
                             f_lower = a_fio.lower()
                             if f_lower in stu_map:
@@ -287,5 +294,5 @@ def render_upload_tab(df_students: pd.DataFrame, is_postgres_active: bool):
                         ]
                         
                         pg_info = f"\n\n{pg_msg}" if pg_msg else ""
-                        st.success(f"🎉 Приказ **{in_order_num}** успешно сохранен! Добавлено **{len(valid_athletes)}** спортсменов.{pg_info}")
+                        st.success(f"🎉 Приказ **{in_order_num}** успешно сохранен! Добавлено **{len(valid_athletes)}** записей.{pg_info}")
                         st.button("🔄 Обновить страницу и увидеть данные в реестре", on_click=lambda: st.rerun())

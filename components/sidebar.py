@@ -24,7 +24,7 @@ def render_sidebar(df_athletes: pd.DataFrame):
     p1, p2, p3 = st.sidebar.columns(3)
     p1.button("Все", key="sb_btn_all", on_click=set_main_cols, args=(list(ALL_MAIN_COLS.keys()),), help="Показать все 12 столбцов")
     p2.button("Кратко", key="sb_btn_brief", on_click=set_main_cols, args=(["ФИО спортсмена / ученика", "Разряд / Статус", "№ приказа", "Дата приказа", "Город"],), help="Краткий вид: ФИО, Разряд, № приказа, Дата, Город")
-    p3.button("Спорт", key="sb_btn_sport", on_click=set_main_cols, args=(["ФИО спортсмена / ученика", "Разряд / Статус", "Категория", "№ приказа", "Дисциплина", "Результат / Статус"],), help="Спортивные квалификации и результаты")
+    p3.button("Спорт/Судьи", key="sb_btn_sport", on_click=set_main_cols, args=(["ФИО спортсмена / ученика", "Разряд / Статус", "Категория", "№ приказа", "Дисциплина", "Результат / Статус"],), help="Квалификации и результаты")
 
     selected_main_cols = st.sidebar.multiselect(
         "Удаляйте крестиком ✕ или добавляйте:",
@@ -40,13 +40,20 @@ def render_sidebar(df_athletes: pd.DataFrame):
 
     category_filter = st.sidebar.radio(
         "Категория учета:",
-        options=["Все записи", "Спортивные разряды", "Юношеские разряды", "Только аттестованные", "Ученики без разряда"],
+        options=[
+            "Все записи",
+            "Спортивные разряды",
+            "Юношеские разряды",
+            "Судейские категории",
+            "Только аттестованные",
+            "Ученики без разряда"
+        ],
         index=0
     )
 
     all_ranks = sorted(df_athletes["rank"].unique().tolist())
     selected_ranks = st.sidebar.multiselect(
-        "Выбор разряда:",
+        "Выбор разряда / категории:",
         options=all_ranks,
         default=[]
     )
@@ -65,9 +72,20 @@ def render_sidebar(df_athletes: pd.DataFrame):
         filtered_df = filtered_df[filtered_df["fio"].str.contains(search_fio, case=False, na=False)]
 
     if category_filter == "Спортивные разряды":
-        filtered_df = filtered_df[filtered_df["rank_type"] == "Спортивный"]
+        filtered_df = filtered_df[
+            (filtered_df["rank_type"] == "Спортивный") & 
+            (~filtered_df["rank"].str.contains("судья|судейск|категори", case=False, na=False))
+        ]
     elif category_filter == "Юношеские разряды":
-        filtered_df = filtered_df[filtered_df["rank_type"] == "Юношеский"]
+        filtered_df = filtered_df[
+            (filtered_df["rank_type"] == "Юношеский") & 
+            (~filtered_df["rank"].str.contains("судья|судейск|категори", case=False, na=False))
+        ]
+    elif category_filter == "Судейские категории":
+        filtered_df = filtered_df[
+            (filtered_df["rank_type"].str.contains("Судейск", case=False, na=False)) |
+            (filtered_df["rank"].str.contains("судья|судейск|категори", case=False, na=False))
+        ]
     elif category_filter == "Только аттестованные":
         filtered_df = filtered_df[filtered_df["rank"] != "Без разряда"]
     elif category_filter == "Ученики без разряда":

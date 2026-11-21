@@ -53,7 +53,7 @@ tab_table, tab_students, tab_orders, tab_stats, tab_athlete, tab_upload = st.tab
     "📑 Приказы и фото документов",
     "📊 Аналитика",
     "👤 Персональное досье",
-    "📥 Внесение разрядов"
+    "📥 Внесение разрядов и категорий"
 ])
 
 with tab_table:
